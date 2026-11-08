@@ -5833,6 +5833,26 @@ fn bubble_frame(
         bubble.clicked() && bubble.has_focus() && !ui.input(|input| input.pointer.any_click());
     let popup_id = bubble_id.with("popup");
     let was_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+    // The link a right-click landed on, kept for as long as the menu it
+    // opened stays open. A right-click elsewhere, or a menu opened from the
+    // keys, has none.
+    let menu_link_id = bubble_id.with("menu-link");
+    let right_click_link = ui
+        .ctx()
+        .data_mut(|data| data.remove_temp::<String>(right_click_link_id(bubble_id)));
+    if right_clicked {
+        ui.ctx().data_mut(|data| {
+            if let Some(link) = right_click_link {
+                data.insert_temp(menu_link_id, link);
+            } else {
+                data.remove::<String>(menu_link_id);
+            }
+        });
+    } else if keyboard_clicked || (force_menu && !was_open) {
+        ui.ctx()
+            .data_mut(|data| data.remove::<String>(menu_link_id));
+    }
+    let menu_link = ui.ctx().data(|data| data.get_temp::<String>(menu_link_id));
     // A menu opened without the pointer stays beside its message for as
     // long as it is open, not only in the frame that opened it: the
     // pointer-anchored placement has no position to go to.
@@ -5941,7 +5961,14 @@ fn bubble_frame(
         popup.at_pointer_fixed()
     };
     let menu = popup.show(|ui| {
-        context_menu(ui, view, menu_target, MenuOrigin::Chat, actions);
+        context_menu(
+            ui,
+            view,
+            menu_target,
+            MenuOrigin::Chat,
+            menu_link.as_deref(),
+            actions,
+        );
     });
     if let Some(menu) = &menu {
         ui.ctx()
@@ -5993,6 +6020,10 @@ fn bubble_frame(
                     .data_mut(|data| data.insert_temp(from_keys_id, false));
             }
         }
+    }
+    if !open_now && menu_link.is_some() {
+        ui.ctx()
+            .data_mut(|data| data.remove::<String>(menu_link_id));
     }
     if at_message || was_open {
         ui.ctx().data_mut(|data| {
@@ -7050,6 +7081,7 @@ fn message_menu_labels(locale: crate::i18n::Locale) -> Vec<String> {
         gettext(locale, "Message info"),
         gettext(locale, "Reload earlier messages"),
         gettext(locale, "Copy message ID"),
+        gettext(locale, "Copy link"),
     ]
     .into_iter()
     .map(|label| label.into_owned())
@@ -7126,7 +7158,7 @@ pub(crate) fn list_menu(
         pins: app.pins.get(&message.chat),
         pin_notices: &[],
     };
-    context_menu(ui, &view, message, MenuOrigin::List, actions);
+    context_menu(ui, &view, message, MenuOrigin::List, None, actions);
 }
 
 /// Quick reactions plus our current reaction when needed.
@@ -7248,11 +7280,14 @@ fn selection_delete_items(
 }
 
 /// Offers actions supported by the selected message, including private replies for eligible group senders.
+/// `link` is the web or mail link the menu was opened on with a right-click,
+/// offered last as Copy link.
 fn context_menu(
     ui: &mut egui::Ui,
     view: &View<'_>,
     message: &Message,
     origin: MenuOrigin,
+    link: Option<&str>,
     actions: &mut Vec<Action>,
 ) {
     let palette = view.palette;
@@ -7677,6 +7712,29 @@ fn context_menu(
     ) {
         actions.push(Action::CopyText(message.id.clone()));
     }
+    if let Some(link) = link {
+        #[cfg(test)]
+        {
+            let rect = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), 28.0));
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(bubble_id(chat, &message.id).with("test-copy-link"), rect);
+            });
+        }
+        if widgets::menu_item(
+            ui,
+            &palette,
+            Some(Icon::Link),
+            &crate::i18n::gettext(view.locale, "Copy link"),
+        ) {
+            actions.push(Action::CopyText(link.to_owned()));
+        }
+    }
+}
+
+/// Where the text body leaves the link a right-click landed on, for the
+/// message menu of the bubble `bubble` to pick up in the same frame.
+fn right_click_link_id(bubble: egui::Id) -> egui::Id {
+    bubble.with("right-click-link")
 }
 
 /// One menu entry for something inside a message: a link, a poll option or
@@ -9872,21 +9930,53 @@ fn rich_body(
                 });
         }
     }
-    if !laid.links.is_empty()
-        && let Some(pos) = response.hover_pos()
-        && laid
-            .galley
-            .rows
-            .iter()
-            .any(|row| Rect::from_min_size(origin + row.pos.to_vec2(), row.row.size).contains(pos))
-    {
-        let cursor = laid.galley.cursor_from_pos(pos - origin);
-        if let Some(url) = laid.link_at(cursor.index.0) {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            if !url.starts_with("tel:") && response.clicked() {
-                actions.push(Action::OpenUrl(url.to_owned()));
+    let link_under =
+        |pos: egui::Pos2| {
+            if !laid.galley.rows.iter().any(|row| {
+                Rect::from_min_size(origin + row.pos.to_vec2(), row.row.size).contains(pos)
+            }) {
+                return None;
             }
+            laid.link_at(laid.galley.cursor_from_pos(pos - origin).index.0)
+        };
+    if !laid.links.is_empty()
+        && let Some(url) = response.hover_pos().and_then(link_under)
+    {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        if !url.starts_with("tel:") && response.clicked() {
+            actions.push(Action::OpenUrl(url.to_owned()));
         }
+    }
+    // A right-click on a web or mail link hands it to the message menu the
+    // bubble opens later this frame, which then offers Copy link. Phone
+    // links have a menu of their own.
+    if !laid.links.is_empty()
+        && let Some(pos) = ui.input(|input| {
+            input
+                .pointer
+                .secondary_clicked()
+                .then(|| input.pointer.interact_pos())
+                .flatten()
+        })
+        && let Some(url) = link_under(pos).filter(|url| !url.starts_with("tel:"))
+    {
+        let copied = url.strip_prefix("mailto:").unwrap_or(url).to_owned();
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(right_click_link_id(id), copied));
+    }
+    #[cfg(test)]
+    if let Some((range, _)) = laid.links.first()
+        && let Some((_, bounds)) =
+            crate::bidi::char_bounds_by_row(&laid.galley, range.start, range.end)
+                .into_iter()
+                .next()
+    {
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                id.with("test-first-link"),
+                bounds.translate(origin.to_vec2()),
+            );
+        });
     }
     inline.map(|reserve| {
         Rect::from_min_max(
@@ -13537,13 +13627,14 @@ mod reaction_tests {
             assert!(measured.contains(label), "menu width leaves out {label}");
         }
         // The fixtures reach every entry a list row's menu can show. A private
-        // reply starts from the group on screen, so only the chat offers it.
+        // reply starts from the group on screen, so only the chat offers it,
+        // and Copy link needs a right-click on a link in the chat.
         let undrawn: Vec<&str> = measured
             .iter()
             .map(String::as_str)
             .filter(|label| !labels.iter().any(|drawn| drawn == label))
             .collect();
-        assert_eq!(undrawn, ["Reply privately"]);
+        assert_eq!(undrawn, ["Reply privately", "Copy link"]);
         // Hover texts are not in the accessibility tree (React with any
         // emoji is, as its button's name).
         labels.extend(["React with any emoji".into(), "Remove your reaction".into()]);

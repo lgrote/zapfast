@@ -15597,6 +15597,98 @@ mod tests {
         assert!(egui::Popup::is_id_open(&ctx, popup), "and it stays open");
     }
 
+    /// A right-click on a link in a message ends its menu with Copy link,
+    /// which copies that link; a right-click elsewhere on the message, or
+    /// a menu opened from the keys, has no Copy link.
+    #[test]
+    fn right_click_on_a_link_offers_copy_link_last() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        for _ in 0..3 {
+            render(&mut app, &ctx);
+        }
+        let chat = sample_ids()[0].to_owned();
+        let id = crate::ui::conversation::bubble_id(&chat, "ada-link");
+        let copy_id = id.with("test-copy-link");
+        let popup = id.with("popup");
+        let right_click = |app: &mut App, at: egui::Pos2| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame_with(app, &ctx, vec![egui::Event::PointerMoved(at), button(true)]);
+            frame_with(app, &ctx, vec![button(false)]);
+            ctx.data_mut(|data| data.remove::<egui::Rect>(copy_id));
+            render(app, &ctx);
+            assert!(egui::Popup::is_id_open(&ctx, popup), "the menu opens");
+            ctx.data(|data| data.get_temp::<egui::Rect>(copy_id))
+        };
+        let escape = |app: &mut App| {
+            frame_with(
+                app,
+                &ctx,
+                vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            render(app, &ctx);
+            assert!(!egui::Popup::is_id_open(&ctx, popup), "Escape closes it");
+        };
+        let link = ctx
+            .data(|data| data.get_temp::<egui::Rect>(id.with("test-first-link")))
+            .expect("the link is on screen");
+        let copy = right_click(&mut app, link.center()).expect("Copy link is offered");
+        // Last: nothing in the menu is drawn below it.
+        let menu = ctx
+            .data(|data| data.get_temp::<egui::Rect>(id.with("menu-rect")))
+            .unwrap();
+        assert!(
+            copy.bottom() + 16.0 >= menu.bottom(),
+            "Copy link is the last item"
+        );
+        let release = |pressed| egui::Event::PointerButton {
+            pos: copy.center(),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(copy.center()), release(true)],
+        );
+        assert_eq!(
+            copied_text(&mut app, &ctx, release(false)),
+            ["https://spotifast.rocks/"]
+        );
+        render(&mut app, &ctx);
+        assert!(
+            !egui::Popup::is_id_open(&ctx, popup),
+            "choosing it closes the menu"
+        );
+
+        // The preview card below the text is the same message, not the link.
+        let rect = ctx.read_response(id).unwrap().rect;
+        let on_card = rect.left_top() + egui::vec2(rect.width() / 2.0, 40.0);
+        assert!(
+            right_click(&mut app, on_card).is_none(),
+            "no Copy link off the link"
+        );
+        escape(&mut app);
+        // Opened on the link and then elsewhere, the old link does not stick.
+        assert!(right_click(&mut app, link.center()).is_some());
+        escape(&mut app);
+        assert!(right_click(&mut app, on_card).is_none());
+        escape(&mut app);
+    }
+
     /// #240: a right-click in the empty strip beside a bubble opens that
     /// message's menu, on either side of the chat.
     #[test]
