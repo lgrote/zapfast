@@ -22539,6 +22539,43 @@ mod tests {
         }
     }
 
+    /// A draft that fits the field leaves its scroll area nothing to scroll,
+    /// so no scroll bar shows. egui's text field is a full font row tall,
+    /// which can be a fraction more than the laid-out line (17.09 against 17
+    /// points in macOS's system font), and once overflowed the field. Tests
+    /// draw Inter, whose line rounds up to cover its row, so the font is
+    /// scaled until it rounds down.
+    #[test]
+    fn a_short_draft_never_overflows_the_composer() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            for draft in ["", "A synthetic draft", "one\ntwo"] {
+                let mut app = app();
+                app.composer = draft.into();
+                let ctx = egui::Context::default();
+                ctx.set_pixels_per_point(scale);
+                app.attach(&ctx);
+                render(&mut app, &ctx);
+                let mut fonts = ctx.fonts(|fonts| fonts.definitions().clone());
+                for data in fonts.font_data.values_mut() {
+                    std::sync::Arc::make_mut(data).tweak.scale *= 0.98;
+                }
+                ctx.set_fonts(fonts);
+                for _ in 0..3 {
+                    frame_with(&mut app, &ctx, Vec::new());
+                }
+                let (content, viewport) = ctx
+                    .data(|data| {
+                        data.get_temp::<(f32, f32)>(crate::ui::conversation::composer_scroll_id())
+                    })
+                    .expect("the composer is drawn");
+                assert!(
+                    content <= viewport,
+                    "{draft:?} at {scale}x: content {content} overflows {viewport}"
+                );
+            }
+        }
+    }
+
     /// A keystroke that wraps the draft onto another line, or joins it back,
     /// shows the grown field in that same frame: sizing it from the frame
     /// before made the field and its text jump while typing.

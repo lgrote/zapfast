@@ -1689,6 +1689,13 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat, review_send: Option<b
                 .layout_no_wrap("x".to_owned(), theme::regular(BODY_SIZE), palette.text)
                 .size()
                 .y;
+            // egui's text field is never shorter than one row of its font, and
+            // the row can be a fraction taller than the laid-out line ("x"
+            // rounds to the pixel grid). A viewport the line's height left
+            // the empty field a sliver to scroll, and a scroll bar with it.
+            let one_row = ui.fonts_mut(|fonts| fonts.row_height(&theme::regular(BODY_SIZE)))
+                + ui.spacing().extra_text_line_spacing;
+            let min_text = line_height.max(one_row);
             // Every control sits in a band as tall as a one-line field at the
             // bottom of the row, centred on it. The field grows to six lines
             // above that band, so the buttons stay beside its last line.
@@ -1719,7 +1726,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat, review_send: Option<b
                 })
                 .or_else(|| ui.ctx().read_response(id).map(|previous| previous.rect.height()))
                 .unwrap_or(line_height)
-                .clamp(line_height, line_height * 6.0);
+                .clamp(min_text, line_height * 6.0);
             let row_height = (text_height + 2.0 * field_margin).max(line);
             let pill = widgets::raised(ui, &palette, composer_pill(&palette), |ui| {
             ui.allocate_ui_with_layout(
@@ -1801,7 +1808,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat, review_send: Option<b
                         // Grow from one to six lines, then scroll. The height
                         // is this frame's draft, measured above, rather than
                         // the scroll area's memory of the last frame.
-                        egui::ScrollArea::vertical()
+                        let scrolled = egui::ScrollArea::vertical()
                             .id_salt("composer-scroll")
                             .max_height(text_height)
                             .min_scrolled_height(text_height)
@@ -1913,7 +1920,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat, review_send: Option<b
                                 .0
                                 .size()
                                 .y
-                                .clamp(line_height, line_height * 6.0);
+                                .clamp(min_text, line_height * 6.0);
                                 ui.ctx().data_mut(|data| {
                                     data.insert_temp(composer_text_id(), painted);
                                 });
@@ -2038,6 +2045,12 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat, review_send: Option<b
                                     response.request_focus();
                                 }
                             });
+                        ui.ctx().data_mut(|data| {
+                            data.insert_temp(
+                                composer_scroll_id(),
+                                (scrolled.content_size.y, scrolled.inner_rect.height()),
+                            );
+                        });
                         ui.add_space(bottom);
                         });
                     });
@@ -2209,6 +2222,12 @@ pub(crate) fn composer_id() -> egui::Id {
 /// layout tests.
 pub(crate) fn composer_text_id() -> egui::Id {
     egui::Id::new("composer-text-rect")
+}
+
+/// The composer scroll area's content and viewport heights, as
+/// `(content, viewport)`, for layout tests.
+pub(crate) fn composer_scroll_id() -> egui::Id {
+    egui::Id::new("composer-scroll-metrics")
 }
 
 /// Where the composer's rounded field was drawn, for layout tests.
